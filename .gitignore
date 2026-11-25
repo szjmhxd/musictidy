@@ -10,3 +10,4 @@ name*.json
 *_plan.csv
 *_move_log.csv
 .DS_Store
+smoke_result.txt

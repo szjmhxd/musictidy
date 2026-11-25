@@ -1,6 +1,0 @@
-version: 0.1.0
-ffmpeg: D:\environment\ffmpeg\bin\ffmpeg.EXE
-fpcalc: fpcalc
-cache: C:\Users\szjm\.mtcli_cache
-sanitize: OK
-smoke: PASS
