@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "musictidy"
+version = "0.1.0"
+description = "音乐库整理工具：识别元数据、写标签、归档目录、导出歌词封面"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+dependencies = [
+    "mutagen>=1.46",
+    "zhconv>=1.4.3",
+]
+
+[project.scripts]
+musictidy = "musictidy.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["musictidy*"]

@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+scan.json
+name*.json
+*_plan.csv
+*_move_log.csv
+.DS_Store

@@ -1,0 +1,2 @@
+mutagen>=1.46
+zhconv>=1.4.3
