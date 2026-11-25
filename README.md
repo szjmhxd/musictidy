@@ -16,6 +16,10 @@
 
 ## 安装
 
+**免安装（Windows）**：到 [Releases](https://github.com/szjmhxd/musictidy/releases) 下载 `musictidy.exe`，双击即用（ffmpeg/fpcalc 同样按下方说明配置）。
+
+**从源码运行**：
+
 ```bash
 git clone https://github.com/szjmhxd/musictidy.git
 cd musictidy
@@ -76,6 +80,14 @@ python -m musictidy export --root "D:\Music"
 | `FFMPEG` / `FPCALC` | PATH 查找 | 音频指纹工具路径 |
 | `MTCLI_QPS` | `2.5` | 对接口的请求速率上限 |
 | `MTCLI_ROOT` | `M:\_整理` | export 命令默认扫描目录 |
+
+## 自行打包 exe
+
+```bash
+pip install pyinstaller
+pyinstaller --noconfirm --onefile --windowed --name musictidy --collect-all zhconv run_gui.py
+# 产物在 dist/musictidy.exe；`dist\musictidy.exe --smoke` 可做无界面自检
+```
 
 ## 致谢
 
