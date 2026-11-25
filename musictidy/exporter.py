@@ -11,7 +11,11 @@ import sys
 import subprocess
 import collections
 
-sys.stdout.reconfigure(encoding="utf-8")
+if sys.stdout is not None:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import mutagen

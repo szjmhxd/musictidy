@@ -16,7 +16,11 @@ import json
 import collections
 from concurrent.futures import ThreadPoolExecutor
 
-sys.stdout.reconfigure(encoding="utf-8")
+if sys.stdout is not None:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 KEEP_ROOT = os.environ.get("MTCLI_KEEP_ROOT", r"M:\_整理")
 DUP_ROOT = os.environ.get("MTCLI_DUP_ROOT", r"M:\_重复待删")

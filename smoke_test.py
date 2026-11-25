@@ -63,9 +63,26 @@ def t_gui():
     app.destroy()
     print("       GUI 构建/销毁 OK")
 
+def t_gui_import_stdout_none():
+    """模拟 --windowed 打包：sys.stdout 为 None 时导入 gui 不能崩。"""
+    import builtins
+    real_stdout, real_stderr = sys.stdout, sys.stderr
+    # 先按打包入口的方式修 stdio，再导入
+    sys.stdout = sys.stderr = None
+    try:
+        import importlib
+        import musictidy.exporter  # noqa: F401  (含 reconfigure 调用)
+        import musictidy.quality   # noqa: F401
+        importlib.reload(sys.modules["musictidy.exporter"])
+        importlib.reload(sys.modules["musictidy.quality"])
+    finally:
+        sys.stdout, sys.stderr = real_stdout, real_stderr
+    print("       stdout=None 导入安全 OK")
+
 check("imports & config", t_imports)
 check("sanitize", t_sanitize)
 check("build_plan", t_plan)
 check("GUI construct", t_gui)
+check("import with stdout=None", t_gui_import_stdout_none)
 print("\nALL PASS" if ok else "\nHAS FAILURES")
 sys.exit(0 if ok else 1)

@@ -6,6 +6,22 @@ import os
 import sys
 
 
+def _fix_stdio():
+    """--windowed 打包下 sys.stdout/stderr 是 None，print/reconfigure 会直接崩。
+    重定向到日志文件，顺带留下诊断信息。"""
+    if sys.stdout is None or sys.stderr is None:
+        import io
+        log_path = os.path.join(os.environ.get("TEMP", "."), "musictidy.log")
+        try:
+            fh = open(log_path, "w", encoding="utf-8", errors="replace")
+        except OSError:
+            fh = io.StringIO()
+        if sys.stdout is None:
+            sys.stdout = fh
+        if sys.stderr is None:
+            sys.stderr = fh
+
+
 def smoke() -> int:
     """无 GUI 自检：写结果到 smoke_result.txt，返回退出码。"""
     out = []
@@ -18,6 +34,8 @@ def smoke() -> int:
         out.append(f"cache: {core.CACHE_DIR}")
         assert pipeline.sanitize('a/b:c') == "a b c"
         out.append("sanitize: OK")
+        import musictidy.gui  # noqa: F401  (覆盖 GUI 导入路径，含 exporter/quality)
+        out.append("gui import: OK")
         out.append("smoke: PASS")
         code = 0
     except Exception:
@@ -31,6 +49,7 @@ def smoke() -> int:
 
 
 def main():
+    _fix_stdio()
     if len(sys.argv) > 1 and sys.argv[1] == "--smoke":
         sys.exit(smoke())
     try:
