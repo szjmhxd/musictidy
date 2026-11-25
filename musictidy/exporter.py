@@ -96,7 +96,10 @@ def write_jpg(data, mime, dst):
     with open(tmp_in, "wb") as f:
         f.write(data)
     try:
-        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_in, dst], check=True)
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", tmp_in, dst],
+                       check=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+                       if os.name == "nt" else 0)
         return True
     except Exception:
         return False

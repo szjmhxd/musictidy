@@ -71,6 +71,11 @@ def _find_exe(env_key, *candidates):
 
 FFMPEG = _find_exe("FFMPEG", shutil.which("ffmpeg"), "ffmpeg")
 FPCALC = _find_exe("FPCALC", shutil.which("fpcalc"), "fpcalc")
+
+# Windows 下 GUI（--windowed 打包）起控制台子程序会弹一个可见控制台窗口，
+# 批量处理几千个文件就是几千个窗口，足以卡死桌面。CREATE_NO_WINDOW 全部静默跑。
+NO_WINDOW = ({"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+             if os.name == "nt" else {})
 UA = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0 Safari/537.36",
@@ -1273,7 +1278,7 @@ def chromaprint_raw(path: str, length: int = 120, timeout: int = 180):
         return None
     try:
         p = subprocess.run([FPCALC, "-raw", "-length", str(length), path],
-                           capture_output=True, timeout=timeout)
+                           capture_output=True, timeout=timeout, **NO_WINDOW)
     except Exception:
         return None
     if p.returncode != 0:
@@ -1298,7 +1303,7 @@ def chromaprint_b64(path: str, length: int = 120, timeout: int = 180):
         return None
     try:
         p = subprocess.run([FPCALC, "-length", str(length), path],
-                           capture_output=True, timeout=timeout)
+                           capture_output=True, timeout=timeout, **NO_WINDOW)
         if p.returncode != 0:
             return None
         for line in p.stdout.decode("utf-8", "ignore").splitlines():
@@ -1385,7 +1390,7 @@ def probe_duration(path: str) -> float:
     try:
         p = subprocess.run([exe, "-v", "error", "-show_entries", "format=duration",
                             "-of", "default=nw=1:nk=1", path],
-                           capture_output=True, timeout=30)
+                           capture_output=True, timeout=30, **NO_WINDOW)
         if p.returncode == 0:
             return float(p.stdout.decode().strip() or 0)
     except Exception:

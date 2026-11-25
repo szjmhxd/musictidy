@@ -24,6 +24,9 @@ def t_imports():
     print("       ffmpeg :", core.FFMPEG)
     print("       fpcalc :", core.FPCALC)
     print("       cache  :", core.CACHE_DIR)
+    if os.name == "nt":
+        assert "creationflags" in core.NO_WINDOW, "缺少 CREATE_NO_WINDOW 静默标志"
+        print("       subprocess 静默标志 OK")
 
 def t_sanitize():
     from musictidy.pipeline import sanitize
