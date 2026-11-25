@@ -39,6 +39,7 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from difflib import SequenceMatcher
+from functools import lru_cache
 
 try:
     from zhconv import convert as _zh
@@ -207,6 +208,19 @@ def netease_search_albums(keyword: str, limit: int = 6):
     return out
 
 
+def _normalize_positions(songs: list):
+    """网易云的曲序字段不可靠，两种坏法都见过：
+    《G.E.M.X.X.X.Live》列表顺序是乱的，但 position 是 1..n 的正确排列；
+    《新的心跳》position 几乎全是 3，只有接口返回顺序（下标+1）是对的。
+    判定：position 构成 1..n 排列 → 信 position；否则退回列表顺序。
+    """
+    n = len(songs)
+    ps = [int(s.get("position") or 0) for s in songs]
+    if sorted(ps) != list(range(1, n + 1)):
+        for i, s in enumerate(songs):
+            s["position"] = i + 1
+
+
 def netease_album(album_id, use_cache: bool = True):
     """返回 {'album','year','songs':[{position,title,duration,disc}]}"""
     if not album_id:
@@ -216,7 +230,9 @@ def netease_album(album_id, use_cache: bool = True):
     if use_cache and os.path.exists(cp):
         try:
             with open(cp, encoding="utf-8") as f:
-                return json.load(f)
+                rec = json.load(f)
+            _normalize_positions(rec.get("songs") or [])
+            return rec
         except Exception:
             pass
     d = http_json(f"https://music.163.com/api/album/{album_id}")
@@ -242,6 +258,7 @@ def netease_album(album_id, use_cache: bool = True):
             "cd": (str(s.get("cd")) if str(s.get("cd") or "") not in ("", "1") else ""),
             "song_id": s.get("id"),
         })
+    _normalize_positions(songs)
     pic = a.get("picUrl") or a.get("blurPicUrl") or ""
     rec = {
         "album": a.get("name") or "",
@@ -770,13 +787,43 @@ def _looks_like_person(s: str) -> bool:
     return True
 
 
+# 常见的「非歌手」容器目录：扁平音乐库常直接叫 歌曲 / Music，
+# 不能当歌手名去搜。宁缺毋滥——认不出歌手留给内嵌标签/在线匹配，好过错搜。
+GENERIC_DIR = {"歌曲", "音乐", "music", "musics", "mp3", "flac", "lossless", "无损",
+               "new folder", "新建文件夹", "新文件夹", "downloads", "下载", "audio",
+               "audios", "songs", "song", "歌库", "曲库", "library", "collection",
+               "album", "albums", "artist", "artists", "歌手", "我的音乐", "my music",
+               "desktop", "桌面", "temp", "tmp", "测试", "整理", "backup", "备份"}
+
+
+def _artist_from_name(s: str) -> str:
+    """目录/歌手包名 → 歌手名；不像人名/歌手名就返回空。"""
+    s = re.split(r"[\[\(（【]", s, maxsplit=1)[0].strip()
+    s = re.sub(r"^\d{4}\s*[-_.]\s*", "", s).strip()
+    s = re.sub(r"\[.*?\]|\(.*?\)|（.*?）", "", s).strip()
+    if not s or len(s) > 24 or len(s) < 2:
+        return ""
+    if s.startswith((".", "_")):
+        return ""
+    # "01 你把我灌醉.flac" 这种文件名残片被当成包名 = 路径切错的信号
+    if os.path.splitext(s)[1].lower() in AUDIO_EXT:
+        return ""
+    if re.match(r"^\d{1,3}\s*[.\-_、 ]", s):
+        return ""
+    if s.lower() in GENERIC_DIR or norm(s) in {norm(g) for g in GENERIC_DIR}:
+        return ""
+    return s
+
+
 def parse_path(path: str) -> dict:
-    """从 M:\\<歌手包>\\<...>\\<文件名> 推出 artist/title/album_guess"""
-    parts = path.split("\\")
+    """从 <歌手包>\\<...>\\<文件名> 推出 artist/title/album_guess
+
+    先做路径归一：混用正反斜杠的路径（"E:/歌曲/xx.flac"）直接 split("\\")
+    会把文件名当成歌手包，产生 "01 xx.flac" 这种脏歌手名。
+    """
+    parts = os.path.normpath(path).split(os.sep)
     pack = parts[1] if len(parts) > 1 else ""
-    artist = re.split(r"[\[\(（【]", pack, maxsplit=1)[0].strip()
-    artist = re.sub(r"^\d{4}\s*[-_.]\s*", "", artist).strip()
-    artist = re.sub(r"\[.*?\]|\(.*?\)|（.*?）", "", artist).strip()
+    artist = _artist_from_name(pack)
 
     dirs = [d for d in parts[2:-1]
             if not re.fullmatch(r"(cd|disc|碟)\s*\d+", d.strip(), re.I)]
@@ -841,6 +888,61 @@ def parse_path(path: str) -> dict:
             "disc_hint": disc_hint}
 
 
+@lru_cache(maxsize=8192)
+def read_tag_info(path: str) -> dict:
+    """读内嵌标签的歌手/曲名/专辑/年份/曲序。读不到返回空 dict。"""
+    try:
+        import mutagen
+        mf = mutagen.File(path, easy=True)
+        t = mf.tags or {}
+    except Exception:
+        return {}
+
+    def g(*keys):
+        for k in keys:
+            v = t.get(k)
+            if v:
+                v = str(v[0] if isinstance(v, (list, tuple)) else v).strip()
+                if v:
+                    return v
+        return ""
+
+    return {
+        "artist": g("albumartist", "artist", "album artist"),
+        "title": g("title"),
+        "album": g("album"),
+        "year": re.sub(r"[^\d]", "", g("date", "year"))[:4],
+        "track": re.sub(r"[^\d].*$", "", g("tracknumber")),
+    }
+
+
+def info_with_tags(path: str) -> dict:
+    """parse_path（文件名/目录）+ 内嵌标签合并。
+
+    扁平目录里文件名常不含歌手（"01 曲名.flac"），标签里的歌手/专辑比
+    文件名可靠得多；但曲序仍以文件名为准——很多老标签 tracknumber 是错的
+    （MusicTag 时代全写 1），文件名的序号反而可信。
+    """
+    info = dict(parse_path(path))
+    tag = read_tag_info(path)
+    if not tag:
+        return info
+    if not info.get("artist") and tag.get("artist"):
+        info["artist"] = tag["artist"].split("/")[0].strip()
+        info["artist_hint"] = info.get("artist_hint") or tag["artist"]
+    if not info.get("title") and tag.get("title"):
+        info["title"] = tag["title"]
+    if not info.get("album_guess") and tag.get("album"):
+        info["album_guess"] = re.sub(r"[《》「」]", "", tag["album"]).strip()
+    # 标签曲序只做兜底线索，不并入 track_hint：老标签的 tracknumber 大量是错的
+    # （MusicTag 时代全写 1），文件名序号才是抓轨真值。
+    if tag.get("track"):
+        info["tag_track"] = tag["track"]
+    if tag.get("year"):
+        info["year_hint"] = tag["year"]
+    return info
+
+
 # ---------------------------------------------------------------- 名称路线
 _JUNK_ARTIST = re.compile(r"[^\w\s\u4e00-\u9fff&/、,，.·+\-'’．()（）【】]")
 
@@ -853,11 +955,15 @@ def score_candidate(cand: dict, artist: str, title: str, dur: float) -> float:
     st = sim(title_key(title), title_key(cand["title"]))
     ca = [artist_key(a) for a in cand["artists"]]
     ak = artist_key(artist)
-    sa = 1.0 if ak and ak in ca else (0.65 if any(ak and (ak in c or c in ak) for c in ca) else 0.0)
     sd = 0.0
     if dur and cand["duration"]:
         diff = abs(dur - cand["duration"] / 1000.0)
         sd = 1.0 if diff <= 2 else (0.6 if diff <= 5 else (0.25 if diff <= 15 else 0.0))
+    if not ak:
+        # 完全没有歌手线索（扁平目录 + 文件名无歌手）时不能按歌手打分，
+        # 否则同曲永远卡在 0.45 过不了阈值。改用标题+时长。
+        return 0.7 * st + 0.3 * sd
+    sa = 1.0 if ak and ak in ca else (0.65 if any(ak and (ak in c or c in ak) for c in ca) else 0.0)
     return 0.45 * st + 0.40 * sa + 0.15 * sd
 
 
@@ -928,7 +1034,7 @@ def search_cached(keyword: str, src: str = "netease"):
 
 
 def match_one(path: str, duration: float) -> dict:
-    info = parse_path(path)
+    info = info_with_tags(path)
     artist, title = info["artist"], info["title"]
     src = pick_source(artist)
     out = {
@@ -1065,10 +1171,9 @@ def _fill_songmid(alb: dict, out: dict):
 def locate_track(alb: dict, info: dict, title: str, duration: float, out: dict) -> str:
     """在专辑曲目表里定位曲目，返回 position（空串表示没找到）。
 
-    优先级：文件名里的曲序号 > 时长匹配 > 曲名匹配。
-    文件名序号是抓轨时从 CD 读出的真实曲序，比按时长反查可靠 ——
-    时长相近的两首歌会被对调，序号不会。
-    两者不一致时记录 conflict，留给人工复核。
+    优先级：文件名曲序号 > 曲名匹配 > 时长匹配 > 标签曲序兜底。
+    文件名序号是抓轨真值，但槽位曲名对不上时（多碟按碟内编号、文件被重命名过）
+    改信曲名定位。各路不一致时记录 conflict，留给人工复核。
     """
     hint = str(info.get("track_hint") or "").strip()
     by_dur = by_name = by_hint = ""
@@ -1078,22 +1183,28 @@ def locate_track(alb: dict, info: dict, title: str, duration: float, out: dict) 
         if duration and s["duration"] and abs(s["duration"] / 1000.0 - duration) <= 2:
             by_dur = str(s["position"])
             break
+    # 曲名两遍：先严格，再包含（"偶尔" ⊂ "偶尔 (Piano Session Live)"）。
+    # 取最高分而不是首个命中："是否 (Piano Session Live)" 与
+    # "偶尔 (Piano Session Live)" 共享长英文后缀，模糊分也能过 0.85。
+    best_s, best_p = 0.0, ""
     for s in alb["songs"]:
-        if sim(title_key(title), title_key(s["title"])) >= 0.85:
-            by_name = str(s["position"])
-            break
-
-    # 文件名序号来自抓轨，优先级最高：实测网易云部分专辑 position 是乱序的
-    # （《全面沦陷》云端为 3.不害怕 / 2.第一页 / 1.再见之前，实体 CD 是 1.不害怕）。
-    # 只在序号超出专辑曲目数时才弃用 —— 那种情况说明序号是文件夹内累计编号。
-    chosen, src = "", ""
-    if hint.isdigit() and 1 <= int(hint) <= (max(positions) if positions else 0):
-        by_hint = hint
-        chosen, src = hint, "filename"
-    elif by_name:
-        chosen, src = by_name, "title"
-    elif by_dur:
-        chosen, src = by_dur, "duration"
+        sc = sim(title_key(title), title_key(s["title"]))
+        if sc > best_s:
+            best_s, best_p = sc, str(s["position"])
+    if best_s >= 0.85:
+        by_name = best_p
+    if not by_name:
+        tk = title_key(title)
+        if len(tk) >= 2:
+            best_len, best_p = None, ""
+            for s in alb["songs"]:
+                sk = title_key(s["title"])
+                if sk and (tk in sk or sk in tk):
+                    # 多个包含候选时取长度最接近的（差异后缀最短的）
+                    d = abs(len(sk) - len(tk))
+                    if best_len is None or d < best_len:
+                        best_len, best_p = d, str(s["position"])
+            by_name = best_p
 
     def _n(x):
         try:
@@ -1101,9 +1212,35 @@ def locate_track(alb: dict, info: dict, title: str, duration: float, out: dict) 
         except (TypeError, ValueError):
             return None
 
+    chosen, src = "", ""
+    if hint.isdigit() and 1 <= int(hint) <= (max(positions) if positions else 0):
+        by_hint = hint
+        slot = next((s for s in alb["songs"] if _n(s["position"]) == int(hint)), None)
+        slot_title = (slot or {}).get("title") or ""
+        # 槽位存在且曲名对得上（或曲名没另给出定位）才认文件名序号；
+        # 对不上说明这是碟内编号/重命名残留，以曲名定位为准。
+        if slot is not None and (not slot_title or not by_name or _n(by_name) == int(hint)
+                                 or sim(title_key(title), title_key(slot_title)) >= 0.5):
+            chosen, src = hint, "filename"
+        elif by_name:
+            chosen, src = by_name, "title"
+        else:
+            chosen, src = hint, "filename"   # 没别的线索，仍以文件名序号为准
+    elif by_name:
+        chosen, src = by_name, "title"
+    elif by_dur:
+        chosen, src = by_dur, "duration"
+    else:
+        # 标签曲序是最后手段：老标签错误率高，能不用就不用。
+        tt = str(info.get("tag_track") or "").strip()
+        if tt.isdigit() and 1 <= int(tt) <= (max(positions) if positions else 0):
+            by_hint = tt
+            chosen, src = tt, "tag"
+
     if chosen:
         out["track"] = chosen
         out["track_src"] = src
+        out["hit"] = True
         cn = _n(chosen)
         for s in alb["songs"]:
             if _n(s["position"]) == cn:
@@ -1115,10 +1252,10 @@ def locate_track(alb: dict, info: dict, title: str, duration: float, out: dict) 
                 if s.get("artists"):
                     out["m_artist"] = " / ".join(s["artists"])
                 break
-        # 云端曲序与本地的分歧留痕，供人工复核。
+        # 各路曲序的分歧留痕，供人工复核。
         # 必须按数字比：文件名 hint 常带前导零（"001"），云端 position 是 "1"，
         # 直接比字符串会让每条记录都"冲突"。
-        others = {x for x in (by_dur, by_name)
+        others = {x for x in (by_dur, by_name, by_hint)
                   if x and _n(x) != cn}
         if others:
             out["conflict"] = f"本地={chosen} 云端={'/'.join(sorted(others))}"
@@ -1351,7 +1488,8 @@ def resolve_album(artist: str, album_guess: str, durations: list, src: str):
 
 
 def _locate_in_album(alb: dict, path: str, duration: float, out: dict) -> str:
-    return locate_track(alb, parse_path(path), parse_path(path)["title"], duration, out)
+    info = info_with_tags(path)
+    return locate_track(alb, info, info["title"], duration, out)
 
 
 def cmd_match(args):
@@ -1374,7 +1512,7 @@ def cmd_match(args):
     # ---------- Phase 2：按（歌手, 专辑）分组，每组只查一次专辑 ----------
     groups = {}
     for r in rows:
-        info = parse_path(r["path"])
+        info = info_with_tags(r["path"])
         key = (artist_key(info["artist"]), _album_key(info["album_guess"]))
         groups.setdefault(key, {"info": info, "files": []})["files"].append(r)
     print(f"  分 {len(groups)} 组（每组一次专辑查询，不是每首歌一次）")
@@ -1398,13 +1536,13 @@ def cmd_match(args):
         info = g["info"]
         src = pick_source(info["artist"])
         durations_ = [f["dur"] for f in g["files"]]
-        titles = [parse_path(f["path"])["title"] for f in g["files"]]
+        titles = [info_with_tags(f["path"])["title"] for f in g["files"]]
         alb, q = resolve_album(info["artist"], info["album_guess"], durations_, src)
         opts = [(alb, q, src)]
         # 包名歌手搜不到时，改用文件名里的演唱者再试一次。
         # 原声带/合辑里混着别人的专辑（杨瑞代的《黄俊郎的黑》），
         # 用周杰伦去搜那张专辑永远搜不到。
-        hints = [parse_path(f["path"]).get("artist_hint") for f in g["files"]]
+        hints = [info_with_tags(f["path"]).get("artist_hint") for f in g["files"]]
         hints = [h for h in hints if h]
         if hints:
             hint = Counter(hints).most_common(1)[0][0]
@@ -1426,7 +1564,7 @@ def cmd_match(args):
             q = 0.0
         recs = []
         for f in g["files"]:
-            pinfo = parse_path(f["path"])
+            pinfo = info_with_tags(f["path"])
             out = {
                 "path": f["path"], "ext": f["ext"],
                 "artist_guess": pinfo["artist"], "title_guess": pinfo["title"],

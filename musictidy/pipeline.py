@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from . import core
 from .core import (
-    AUDIO_EXT, parse_path, pick_source, resolve_album, locate_track,
+    AUDIO_EXT, info_with_tags, pick_source, resolve_album, locate_track,
     match_one, duration_of, artist_key, title_key, sim, _album_key,
     _fill_songmid,
 )
@@ -69,7 +69,7 @@ def match_files(rows: list[dict], workers: int = 8, log=print) -> list[dict]:
 
     groups = {}
     for r in rows:
-        info = parse_path(r["path"])
+        info = info_with_tags(r["path"])
         key = (artist_key(info["artist"]), _album_key(info["album_guess"]))
         groups.setdefault(key, {"info": info, "files": []})["files"].append(r)
     log(f"分 {len(groups)} 组（每组一次专辑查询）")
@@ -89,10 +89,10 @@ def match_files(rows: list[dict], workers: int = 8, log=print) -> list[dict]:
         info = g["info"]
         src = pick_source(info["artist"])
         durations_ = [f["dur"] for f in g["files"]]
-        titles = [parse_path(f["path"])["title"] for f in g["files"]]
+        titles = [info_with_tags(f["path"])["title"] for f in g["files"]]
         alb, q = resolve_album(info["artist"], info["album_guess"], durations_, src)
         opts = [(alb, q, src)]
-        hints = [parse_path(f["path"]).get("artist_hint") for f in g["files"]]
+        hints = [info_with_tags(f["path"]).get("artist_hint") for f in g["files"]]
         hints = [h for h in hints if h]
         if hints:
             hint = Counter(hints).most_common(1)[0][0]
@@ -110,7 +110,7 @@ def match_files(rows: list[dict], workers: int = 8, log=print) -> list[dict]:
             q = 0.0
         recs = []
         for f in g["files"]:
-            pinfo = parse_path(f["path"])
+            pinfo = info_with_tags(f["path"])
             out = {
                 "path": f["path"], "ext": f["ext"],
                 "artist_guess": pinfo["artist"], "title_guess": pinfo["title"],

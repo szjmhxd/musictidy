@@ -79,9 +79,52 @@ def t_gui_import_stdout_none():
         sys.stdout, sys.stderr = real_stdout, real_stderr
     print("       stdout=None 导入安全 OK")
 
+def t_parse_flat():
+    """扁平目录 + 混用斜杠：歌手不能被解析成文件名/容器目录名。"""
+    from musictidy.core import parse_path, _normalize_positions, locate_track
+    i = parse_path("E:/songs/01 你把我灌醉.flac")
+    assert i["artist"] == "", i["artist"]
+    assert i["title"] == "你把我灌醉" and i["track_hint"] == "01", i
+    i2 = parse_path("E:\\Music\\x\\02 晴天.mp3")
+    assert i2["artist"] == "", i2["artist"]  # 单字符目录名不是歌手
+    i3 = parse_path("M:\\周杰伦\\叶惠美\\03 晴天.flac")
+    assert i3["artist"] == "周杰伦" and i3["album_guess"] == "叶惠美", i3
+    print("       parse_path 扁平/M: 结构 OK")
+
+def t_positions():
+    """网易云 position 坏数据归一：排列保留，重复/缺号退回列表序。"""
+    from musictidy.core import _normalize_positions
+    a = [{"position": 3}, {"position": 1}, {"position": 2}]   # 排列 → 保留
+    _normalize_positions(a)
+    assert [s["position"] for s in a] == [3, 1, 2], a
+    b = [{"position": 3}, {"position": 3}, {"position": 1}]   # 坏 → 列表序
+    _normalize_positions(b)
+    assert [s["position"] for s in b] == [1, 2, 3], b
+    print("       _normalize_positions OK")
+
+def t_locate_best():
+    """曲名定位取最高分：长共享后缀不能让 '偶尔 (Piano)' 抢走 '是否 (Piano)'。"""
+    from musictidy.core import locate_track
+    alb = {"songs": [
+        {"position": 16, "no": 4, "title": "偶尔 (Piano Session Live)",
+         "artists": ["G.E.M.邓紫棋"], "duration": 200000, "cd": "", "song_id": 1},
+        {"position": 20, "no": 8, "title": "是否 (Piano Session Live)",
+         "artists": ["G.E.M.邓紫棋"], "duration": 210000, "cd": "", "song_id": 2},
+    ]}
+    out = {}
+    r = locate_track(alb, {"track_hint": "9"}, "是否 (Piano Session Live)", 210, out)
+    assert r == "20", (r, out)
+    out2 = {}
+    r2 = locate_track(alb, {}, "偶尔", 200, out2)      # 包含匹配
+    assert r2 == "16", (r2, out2)
+    print("       locate_track 最佳匹配 OK")
+
 check("imports & config", t_imports)
 check("sanitize", t_sanitize)
 check("build_plan", t_plan)
+check("parse flat paths", t_parse_flat)
+check("netease positions", t_positions)
+check("locate best match", t_locate_best)
 check("GUI construct", t_gui)
 check("import with stdout=None", t_gui_import_stdout_none)
 print("\nALL PASS" if ok else "\nHAS FAILURES")
