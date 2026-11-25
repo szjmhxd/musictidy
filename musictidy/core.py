@@ -792,6 +792,41 @@ def _looks_like_person(s: str) -> bool:
     return True
 
 
+# 上传账号/署名残片/网址水印不是歌手名。下载站、网盘分享的文件常把上传者
+# 账号写进歌手标签（"用户429910790"、纯数字 QQ 号、"词曲：xxx" 署名残片），
+# 目录按标签落盘就成了账号文件夹；这类名字搜不到专辑，还会把按歌手打分的
+# 匹配路线带进死胡同。识别前一律剔除。
+_ACCOUNT_NAME = re.compile(
+    r"^(?:用户|uid|user)[\s_\-]*\d+$"
+    r"|^\d{5,}$"
+    r"|^(?:qq|微信|wechat|wx|weixin)\s*[:：]?\s*\w+$"
+    r"|^[a-z0-9.\-_]+@[a-z0-9.\-]+"
+    r"|(?:^|\s)[a-z0-9\-]+\.(?:com|cn|net|org|com\.cn)(?:\s|$)",
+    re.I)
+_CREDIT_PREFIX = re.compile(
+    r"^(?:词曲|作词|作曲|编曲|演唱|翻唱|原唱|歌手|by)\s*[:：]\s*", re.I)
+# 歌词署名里的占位词（"作词 : 无"），不是人名
+_NULL_ARTIST = {"无", "無", "未知", "不详", "不詳", "匿名", "佚名", "无名", "無名",
+                "暂无", "暂無", "n/a", "na", "none", "null", "unknown", "-"}
+
+
+def clean_artist(name) -> str:
+    """剔除上传账号/署名残片/网址水印，返回可信歌手名；不可信返回空串。
+
+    "词曲：许嵩" 这类署名残片剥掉前缀后按正常歌手名处理；
+    "用户429910790"、"12345678901"、"wusunk.com" 直接判空。
+    """
+    s = _CREDIT_PREFIX.sub("", (name or "").strip()).strip()
+    s = s.strip("　 .·、")
+    if not s or len(s) > 40:
+        return ""
+    if s.lower() in _NULL_ARTIST:
+        return ""
+    if _ACCOUNT_NAME.search(s):
+        return ""
+    return s
+
+
 # 常见的「非歌手」容器目录：扁平音乐库常直接叫 歌曲 / Music，
 # 不能当歌手名去搜。宁缺毋滥——认不出歌手留给内嵌标签/在线匹配，好过错搜。
 GENERIC_DIR = {"歌曲", "音乐", "music", "musics", "mp3", "flac", "lossless", "无损",
@@ -817,7 +852,8 @@ def _artist_from_name(s: str) -> str:
         return ""
     if s.lower() in GENERIC_DIR or norm(s) in {norm(g) for g in GENERIC_DIR}:
         return ""
-    return s
+    # "用户429910790" 这类上传账号目录名不是歌手
+    return clean_artist(s)
 
 
 def parse_path(path: str) -> dict:
@@ -893,6 +929,84 @@ def parse_path(path: str) -> dict:
             "disc_hint": disc_hint}
 
 
+_AR_FIELD = re.compile(r"^\s*\[ar\s*[:：]\s*(.+?)\]\s*$", re.M | re.I)
+
+
+def lyric_ar_from_text(txt: str) -> str:
+    """从歌词文本取歌手。取不到返回空串。
+
+    优先 [ar:] 头；下载站的歌词常缺 [ar:]，署名写成带时间轴的普通行
+    （"[00:00.000] 作词 : 许嵩"），退而解析署名行：
+      1. 演唱/歌手/主唱 行最可信；
+      2. 只有作词/作曲时，两者署名相同才认（唱作人自写自唱，
+         如 许嵩《放肆》）；不同说明词曲≠演唱，不能冒充歌手。
+    账号式署名（"作词 : 用户123"）会被 clean_artist 剔除。
+    """
+    m = _AR_FIELD.search(txt or "")
+    if m:
+        return clean_artist(m.group(1))
+    singer = ly = mu = ""
+    for line in (txt or "").splitlines():
+        line = re.sub(r"^\s*\[[^\]]*\]\s*", "", line).strip()  # 剥时间轴
+        mm = re.match(r"^(?:演唱|歌手|演唱者|主唱|翻唱)\s*[:：]\s*(.+)$", line)
+        if mm:
+            singer = singer or clean_artist(mm.group(1))
+            continue
+        mm = re.match(r"^(?:作词|词)\s*[:：]\s*(.+)$", line)
+        if mm:
+            ly = ly or clean_artist(mm.group(1))
+            continue
+        mm = re.match(r"^(?:作曲|曲)\s*[:：]\s*(.+)$", line)
+        if mm:
+            mu = mu or clean_artist(mm.group(1))
+    if singer:
+        return singer
+    return ly if ly and ly == mu else ""
+
+
+def read_lyric_text(path: str) -> str:
+    """内嵌歌词全文（USLT / SYLT / LYRICS / ©lyr…），读不到返回空串。"""
+    try:
+        import mutagen
+        mf = mutagen.File(path)
+    except Exception:
+        return ""
+    tags = getattr(mf, "tags", None)
+    if not tags:
+        return ""
+    best = ""
+    for k, v in tags.items():
+        ks = str(k).upper()
+        if "LYR" in ks or ks.startswith("USLT") or ks.startswith("SYLT"):
+            s = v.text if hasattr(v, "text") else v
+            if isinstance(s, (list, tuple)):
+                s = "\n".join(str(x) for x in s)
+            s = str(s)
+            if len(s) > len(best):
+                best = s
+    return best
+
+
+@lru_cache(maxsize=8192)
+def read_lyric_artist(path: str) -> str:
+    """歌词头 [ar:] 里的歌手。上传账号污染标签/目录名时，这里是真值。
+
+    先读内嵌歌词，再退同名 .lrc / path.lrc 外置歌词。
+    """
+    txt = read_lyric_text(path)
+    if not txt:
+        base = os.path.splitext(path)[0]
+        for cand in (base + ".lrc", path + ".lrc"):
+            try:
+                with open(cand, "r", encoding="utf-8", errors="ignore") as f:
+                    txt = f.read(8192)
+            except OSError:
+                continue
+            if txt:
+                break
+    return lyric_ar_from_text(txt)
+
+
 @lru_cache(maxsize=8192)
 def read_tag_info(path: str) -> dict:
     """读内嵌标签的歌手/曲名/专辑/年份/曲序。读不到返回空 dict。"""
@@ -922,29 +1036,44 @@ def read_tag_info(path: str) -> dict:
 
 
 def info_with_tags(path: str) -> dict:
-    """parse_path（文件名/目录）+ 内嵌标签合并。
+    """parse_path（文件名/目录）+ 内嵌标签 + 歌词头 [ar:] 合并。
 
     扁平目录里文件名常不含歌手（"01 曲名.flac"），标签里的歌手/专辑比
     文件名可靠得多；但曲序仍以文件名为准——很多老标签 tracknumber 是错的
     （MusicTag 时代全写 1），文件名的序号反而可信。
+
+    反过来标签也不全可信：下载站/网盘分享的文件常把上传账号写进歌手字段
+    （"用户429910790"、纯数字 QQ 号），照着落盘就生成账号文件夹。账号名
+    一律剔除，改用歌词头 [ar:] 兜底；与目录歌手不一致时把 [ar:] 留在
+    lyric_ar 字段，匹配阶段拿它当歌手线索搜专辑。
     """
     info = dict(parse_path(path))
+    # 目录名也可能是上传账号（"用户429910790" 文件夹）
+    if info.get("artist") and not clean_artist(info["artist"]):
+        info["artist"] = ""
     tag = read_tag_info(path)
-    if not tag:
-        return info
     if not info.get("artist") and tag.get("artist"):
-        info["artist"] = tag["artist"].split("/")[0].strip()
-        info["artist_hint"] = info.get("artist_hint") or tag["artist"]
-    if not info.get("title") and tag.get("title"):
-        info["title"] = tag["title"]
-    if not info.get("album_guess") and tag.get("album"):
-        info["album_guess"] = re.sub(r"[《》「」]", "", tag["album"]).strip()
-    # 标签曲序只做兜底线索，不并入 track_hint：老标签的 tracknumber 大量是错的
-    # （MusicTag 时代全写 1），文件名序号才是抓轨真值。
-    if tag.get("track"):
-        info["tag_track"] = tag["track"]
-    if tag.get("year"):
-        info["year_hint"] = tag["year"]
+        a = clean_artist(tag["artist"].split("/")[0])
+        if a:
+            info["artist"] = a
+            info["artist_hint"] = info.get("artist_hint") or a
+    if tag:
+        if not info.get("title") and tag.get("title"):
+            info["title"] = tag["title"]
+        if not info.get("album_guess") and tag.get("album"):
+            info["album_guess"] = re.sub(r"[《》「」]", "", tag["album"]).strip()
+        # 标签曲序只做兜底线索，不并入 track_hint：老标签的 tracknumber 大量是错的
+        # （MusicTag 时代全写 1），文件名序号才是抓轨真值。
+        if tag.get("track"):
+            info["tag_track"] = tag["track"]
+        if tag.get("year"):
+            info["year_hint"] = tag["year"]
+    # 歌词头 [ar:] 是最后的真值来源：账号污染标签/目录名时它还写着原唱。
+    lar = read_lyric_artist(path)
+    if lar:
+        info["lyric_ar"] = lar
+        if not info.get("artist"):
+            info["artist"] = lar
     return info
 
 
@@ -952,23 +1081,30 @@ def info_with_tags(path: str) -> dict:
 _JUNK_ARTIST = re.compile(r"[^\w\s\u4e00-\u9fff&/、,，.·+\-'’．()（）【】]")
 
 
-def score_candidate(cand: dict, artist: str, title: str, dur: float) -> float:
+def score_candidate(cand: dict, artist: str, title: str, dur: float,
+                    extra_artists=()) -> float:
     # 网易云上一堆 "周杰伦♚"、"周杰伦. " 这种用户假冒上传，
     # 名字里带符号或纯装饰字符的直接判死，别让它们挤掉正常条目。
     if any(_JUNK_ARTIST.search(a) for a in cand["artists"] if a):
         return 0.0
     st = sim(title_key(title), title_key(cand["title"]))
     ca = [artist_key(a) for a in cand["artists"]]
-    ak = artist_key(artist)
     sd = 0.0
     if dur and cand["duration"]:
         diff = abs(dur - cand["duration"] / 1000.0)
         sd = 1.0 if diff <= 2 else (0.6 if diff <= 5 else (0.25 if diff <= 15 else 0.0))
-    if not ak:
+    clues = [a for a in (artist, *extra_artists) if a and artist_key(a)]
+    if not clues:
         # 完全没有歌手线索（扁平目录 + 文件名无歌手）时不能按歌手打分，
         # 否则同曲永远卡在 0.45 过不了阈值。改用标题+时长。
         return 0.7 * st + 0.3 * sd
-    sa = 1.0 if ak and ak in ca else (0.65 if any(ak and (ak in c or c in ak) for c in ca) else 0.0)
+    # 多条线索（目录歌手 + 歌词头 [ar:]）取最优：目录名可能是上传账号或
+    # 网友昵称（"嘻嘻" 文件夹里装着周杰伦的歌），[ar:] 才是原唱。
+    sa = 0.0
+    for a in clues:
+        ak = artist_key(a)
+        s_ = 1.0 if ak in ca else (0.65 if any(ak and (ak in c or c in ak) for c in ca) else 0.0)
+        sa = max(sa, s_)
     return 0.45 * st + 0.40 * sa + 0.15 * sd
 
 
@@ -1041,7 +1177,8 @@ def search_cached(keyword: str, src: str = "netease"):
 def match_one(path: str, duration: float) -> dict:
     info = info_with_tags(path)
     artist, title = info["artist"], info["title"]
-    src = pick_source(artist)
+    lar = info.get("lyric_ar") or ""
+    src = pick_source(artist or lar)
     out = {
         "path": path, "artist_guess": artist, "title_guess": title,
         "album_guess": info["album_guess"], "track_hint": info["track_hint"],
@@ -1049,40 +1186,66 @@ def match_one(path: str, duration: float) -> dict:
         "hit": False, "score": 0.0,
         "album": "", "year": "", "track": "", "disc": "",
         "m_title": "", "m_artist": "", "source": src,
-        "cover": "", "lyric": "",
+        "cover": "", "lyric": "", "lyric_ar": lar,
     }
     if not title:
         out["err"] = "曲名为空"
         return out
 
-    cands = search_cached(f"{artist} {title}".strip(), src)
-    if not cands:
-        cands = search_cached(title, src)
+    kw_primary = f"{artist} {title}".strip() if artist else title
+    kws_extra = []
+    if lar and artist_key(lar) != artist_key(artist or ""):
+        kws_extra.append(f"{lar} {title}".strip())
+    if title != kw_primary:
+        kws_extra.append(title)
+
+    def _pull(kws, src_):
+        got, seen = [], set()
+        for kw in kws:
+            for c in search_cached(kw, src_) or []:
+                key = (c.get("id"), c.get("title"))
+                if key not in seen:
+                    seen.add(key)
+                    got.append(c)
+        return got
+
+    def _best(cs):
+        b, bs = None, -1.0
+        for c in cs:
+            s = score_candidate(c, artist, title, duration, extra_artists=(lar,))
+            if s > bs:
+                b, bs = c, s
+        return b, bs
+
+    cands = _pull([kw_primary], src)
+    best, best_s = _best(cands) if cands else (None, -1.0)
+    # 首轮没把握再补搜：账号污染的歌手名会把 "用户xxx 曲名" 搜出一堆垃圾，
+    # 真条目反而进不了候选池；歌词头 [ar:] 和纯曲名才是救命词。
+    if best_s < 0.8 and kws_extra:
+        cands += _pull(kws_extra, src)
+        best, best_s = _best(cands)
     if not cands and _soft_block_count("qq") < SOFT_BLOCK_LIMIT:
         # QQ 风控会间歇性返回空，等几秒再试一次。
         # 但如果是整体软封（连续大量空结果），这句 sleep 会把整库拖成几十分钟，
         # 所以连续空到一定次数就不再等，直接换替补源。
         time.sleep(2.5)
-        cands = search_cached(f"{artist} {title}".strip(), src)
+        cands = _pull([kw_primary] + kws_extra, src)
+        best, best_s = _best(cands) if cands else (None, -1.0)
     _note_search(src, bool(cands))
     if not cands:
         # 换替补源再试（版权差异、QQ 软封都会导致主源空）。
         # 黑名单歌手不会退到网易云，避免被 "周杰伦♚" 这类假冒条目顶替。
-        for alt in source_chain(artist, src):
-            cands = search_cached(f"{artist} {title}".strip(), alt)
+        for alt in source_chain(artist or lar, src):
+            cands = _pull([kw_primary] + kws_extra, alt)
             if cands:
                 src = alt
                 out["source"] = alt
+                best, best_s = _best(cands)
                 break
     if not cands:
         out["err"] = "无搜索结果"
         return out
 
-    best, best_s = None, -1.0
-    for c in cands:
-        s = score_candidate(c, artist, title, duration)
-        if s > best_s:
-            best, best_s = c, s
     out["score"] = round(best_s, 3)
     if best_s < 0.55:
         # 分数太低说明搜到的是翻唱/同名曲/别人的歌（例如《追》搜到翻唱专辑）。
@@ -1544,17 +1707,23 @@ def cmd_match(args):
         titles = [info_with_tags(f["path"])["title"] for f in g["files"]]
         alb, q = resolve_album(info["artist"], info["album_guess"], durations_, src)
         opts = [(alb, q, src)]
-        # 包名歌手搜不到时，改用文件名里的演唱者再试一次。
+        # 包名歌手搜不到时，改用文件名里的演唱者 / 歌词头 [ar:] 再试。
         # 原声带/合辑里混着别人的专辑（杨瑞代的《黄俊郎的黑》），
-        # 用周杰伦去搜那张专辑永远搜不到。
-        hints = [info_with_tags(f["path"]).get("artist_hint") for f in g["files"]]
-        hints = [h for h in hints if h]
-        if hints:
-            hint = Counter(hints).most_common(1)[0][0]
-            if artist_key(hint) != artist_key(info["artist"]):
-                src2 = pick_source(hint)
-                alb2, q2 = resolve_album(hint, info["album_guess"], durations_, src2)
-                opts.append((alb2, q2, src2))
+        # 用周杰伦去搜那张专辑永远搜不到；"嘻嘻" 这种网友昵称目录同理。
+        hints = []
+        for f in g["files"]:
+            pi = info_with_tags(f["path"])
+            for h in (pi.get("artist_hint"), pi.get("lyric_ar")):
+                if h:
+                    hints.append(h)
+        tried = {artist_key(info["artist"])}
+        for hint, _n in Counter(hints).most_common(2):
+            if artist_key(hint) in tried:
+                continue
+            tried.add(artist_key(hint))
+            src2 = pick_source(hint)
+            alb2, q2 = resolve_album(hint, info["album_guess"], durations_, src2)
+            opts.append((alb2, q2, src2))
         # 用"专辑里有几首歌能对上文件名"选优，而不是比质量分
         ranked = [(_title_hits(o[0], titles), (o[0] or {}).get("_name_sim") or 0, o[1], o)
                   for o in opts]
@@ -1577,7 +1746,7 @@ def cmd_match(args):
                 "duration": round(f["dur"], 1), "hit": False, "score": round(q, 3),
                 "album": "", "year": "", "track": "", "disc": "",
                 "m_title": "", "m_artist": "", "source": f"{src}-album",
-                "cover": "", "lyric": "",
+                "cover": "", "lyric": "", "lyric_ar": pinfo.get("lyric_ar") or "",
             }
             if alb:
                 out.update({"album": alb["album"], "year": alb["year"],

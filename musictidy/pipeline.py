@@ -21,7 +21,7 @@ from . import core
 from .core import (
     AUDIO_EXT, info_with_tags, pick_source, resolve_album, locate_track,
     match_one, duration_of, artist_key, title_key, sim, _album_key,
-    _fill_songmid,
+    _fill_songmid, clean_artist,
 )
 from . import writer as _writer
 
@@ -92,14 +92,22 @@ def match_files(rows: list[dict], workers: int = 8, log=print) -> list[dict]:
         titles = [info_with_tags(f["path"])["title"] for f in g["files"]]
         alb, q = resolve_album(info["artist"], info["album_guess"], durations_, src)
         opts = [(alb, q, src)]
-        hints = [info_with_tags(f["path"]).get("artist_hint") for f in g["files"]]
-        hints = [h for h in hints if h]
-        if hints:
-            hint = Counter(hints).most_common(1)[0][0]
-            if artist_key(hint) != artist_key(info["artist"]):
-                src2 = pick_source(hint)
-                alb2, q2 = resolve_album(hint, info["album_guess"], durations_, src2)
-                opts.append((alb2, q2, src2))
+        # 文件名里的演唱者 / 歌词头 [ar:] 也当歌手线索试一次：
+        # 原声带/合辑混着别人的专辑，"嘻嘻" 这种网友昵称目录更是全靠 [ar:]。
+        hints = []
+        for f in g["files"]:
+            pi = info_with_tags(f["path"])
+            for h in (pi.get("artist_hint"), pi.get("lyric_ar")):
+                if h:
+                    hints.append(h)
+        tried = {artist_key(info["artist"])}
+        for hint, _n in Counter(hints).most_common(2):
+            if artist_key(hint) in tried:
+                continue
+            tried.add(artist_key(hint))
+            src2 = pick_source(hint)
+            alb2, q2 = resolve_album(hint, info["album_guess"], durations_, src2)
+            opts.append((alb2, q2, src2))
         ranked = [(_title_hits(o[0], titles), (o[0] or {}).get("_name_sim") or 0, o[1], o)
                   for o in opts]
         hits_best, _, _, best = max(ranked, key=lambda x: x[:3])
@@ -118,7 +126,7 @@ def match_files(rows: list[dict], workers: int = 8, log=print) -> list[dict]:
                 "duration": round(f["dur"], 1), "hit": False, "score": round(q, 3),
                 "album": "", "year": "", "track": "", "disc": "",
                 "m_title": "", "m_artist": "", "source": f"{src}-album",
-                "cover": "", "lyric": "",
+                "cover": "", "lyric": "", "lyric_ar": pinfo.get("lyric_ar") or "",
             }
             if alb:
                 out.update({"album": alb["album"], "year": alb["year"],
@@ -261,11 +269,15 @@ def build_plan(records: list[dict], library_root: str) -> list[dict]:
     不同录音加 " (2)" 后缀。返回 [{src, dst, action, note}]。
     """
     def lead_artist(rec):
-        a = rec.get("m_artist") or rec.get("artist_guess") or "未知"
-        for sep in ("、", ",", "/", "&", ";", " feat. ", " feat ", "（", "("):
-            if sep in a:
-                a = a.split(sep)[0]
-        return sanitize(a)
+        # 匹配命中的歌手最可信；目录/标签歌手可能是上传账号
+        # （"用户429910790"），账号名一律跳过，最后用歌词头 [ar:] 兜底。
+        for cand in (rec.get("m_artist"), rec.get("artist_guess"), rec.get("lyric_ar")):
+            for a in re.split(r"[、/,;&]|\s+feat\.?\s+|\s+ft\.?\s+|（|\(",
+                              cand or "", flags=re.I):
+                a = clean_artist(a)
+                if a:
+                    return sanitize(a)
+        return "未知"
 
     plan = []
     by_target = {}

@@ -2,6 +2,6 @@
 
 流水线: scan → match → write → organize → export
 """
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from . import pipeline  # noqa: F401

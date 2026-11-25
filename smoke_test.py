@@ -122,8 +122,63 @@ def t_locate_best():
     assert r2 == "16", (r2, out2)
     print("       locate_track 最佳匹配 OK")
 
+def t_clean_artist():
+    """上传账号/署名残片/网址水印不能当歌手名。"""
+    from musictidy.core import clean_artist
+    assert clean_artist("用户429910790") == ""
+    assert clean_artist("用户 1234567") == ""
+    assert clean_artist("12345678901") == ""
+    assert clean_artist("wusunk.com") == ""
+    assert clean_artist("letians.cn") == ""
+    assert clean_artist("") == ""
+    assert clean_artist("词曲：许嵩") == "许嵩"          # 署名残片剥前缀
+    assert clean_artist("周杰伦") == "周杰伦"
+    assert clean_artist("G.E.M.邓紫棋") == "G.E.M.邓紫棋"
+    print("       clean_artist 账号过滤 OK")
+
+def t_lyric_ar_text():
+    """歌词头 [ar:] / 署名行解析，账号式署名同样剔除。"""
+    from musictidy.core import lyric_ar_from_text
+    assert lyric_ar_from_text("[ti:绽放]\n[ar:张杰]\n[00:01]xx") == "张杰"
+    assert lyric_ar_from_text("[ar: 用户1234567]") == ""
+    assert lyric_ar_from_text("[ar: 词曲：许嵩]") == "许嵩"
+    assert lyric_ar_from_text("没有头") == ""
+    # 无 [ar:] 的下载站歌词：署名行退路
+    assert lyric_ar_from_text(
+        "[00:00.000] 作词 : 许嵩\n[00:01.000] 作曲 : 许嵩") == "许嵩"   # 唱作人
+    assert lyric_ar_from_text(
+        "[00:00.000] 作词 : 林夕\n[00:01.000] 作曲 : 陈辉阳") == ""     # 词曲≠演唱
+    assert lyric_ar_from_text(
+        "[00:00.000] 作词 : 用户17526591924\n[00:01.000] 作曲 : 用户17526591924") == ""
+    assert lyric_ar_from_text(
+        "[00:00.000] 演唱 : 陈奕迅\n[00:01.000] 作词 : 林夕") == "陈奕迅"
+    assert lyric_ar_from_text(
+        "[00:00.00]作词 : 无\n[00:05.55]作曲 : 无") == ""          # 占位词不是歌手
+    print("       lyric [ar:]/署名行 解析 OK")
+
+def t_plan_junk_artist():
+    """归档命名最终防线：账号歌手跳过，歌词头 [ar:] 兜底。"""
+    import tempfile
+    from musictidy import pipeline
+    tmp = tempfile.mkdtemp()
+    src = os.path.join(tmp, "x.flac")
+    open(src, "wb").close()
+    recs = [{"path": src, "ext": ".flac", "m_title": "绽放", "m_artist": "",
+             "artist_guess": "用户1928115219", "lyric_ar": "张杰",
+             "album": "", "year": "", "track": "", "duration": 200}]
+    plan = pipeline.build_plan(recs, os.path.join(tmp, "lib"))
+    assert "张杰" in plan[0]["dst"] and "用户" not in plan[0]["dst"], plan[0]
+    recs2 = [{"path": src, "ext": ".flac", "m_title": "x", "m_artist": "用户1234567",
+              "artist_guess": "12345678901", "duration": 200}]
+    plan2 = pipeline.build_plan(recs2, os.path.join(tmp, "lib"))
+    assert "未知" in plan2[0]["dst"], plan2[0]
+    print("       build_plan 账号歌手兜底 OK")
+
 check("imports & config", t_imports)
 check("sanitize", t_sanitize)
+check("clean_artist", t_clean_artist)
+check("lyric ar parse", t_lyric_ar_text)
+check("plan junk artist", t_plan_junk_artist)
 check("build_plan", t_plan)
 check("parse flat paths", t_parse_flat)
 check("netease positions", t_positions)

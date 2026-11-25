@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "musictidy"
-version = "0.1.3"
+version = "0.1.4"
 description = "音乐库整理工具：识别元数据、写标签、归档目录、导出歌词封面"
 readme = "README.md"
 license = {text = "MIT"}
